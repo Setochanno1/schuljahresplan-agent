@@ -4,15 +4,18 @@ import platform
 import re
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 import tkinter as tk
 from docx import Document
+from docx.enum.section import WD_ORIENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
 from tkcalendar import DateEntry
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -22,21 +25,12 @@ APP_NAME = "Schuljahresplan Agent"
 APP_VERSION = "1.1"
 SETTINGS_FILE = "settings.json"
 
-
-def resource_path(relative_path):
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS) / relative_path
-    return Path(__file__).parent / relative_path
-
-
 BASE_PATH = Path(os.getcwd())
 SETTINGS_PATH = BASE_PATH / SETTINGS_FILE
 
 AUSGABE_ORDNER = BASE_PATH / "ausgabe"
 BACKUP_ORDNER = AUSGABE_ORDNER / "backups"
 STANDARD_AUSGABE = AUSGABE_ORDNER / "Jahresarbeitsplan_neu.docx"
-
-VORLAGE = resource_path("Jahresarbeitsplan 25-26.docx")
 aktueller_plan = STANDARD_AUSGABE
 
 BUNDESLAENDER = {
@@ -68,12 +62,17 @@ SCHULJAHRE = [
     "2031/2032",
 ]
 
-SPALTEN = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8}
+SPALTEN = {0: 2, 1: 3, 2: 4, 3: 5, 4: 6}
 
+FARBE_HEADER = "D9EAF7"
 FARBE_FERIEN = "BFBFBF"
 FARBE_FREI = "FFF2CC"
 FARBE_WEISS = "FFFFFF"
 
+
+# =========================
+# Einstellungen
+# =========================
 
 def load_settings():
     if not SETTINGS_PATH.exists():
@@ -104,6 +103,10 @@ def save_current_settings():
     save_settings(data)
 
 
+# =========================
+# Word-Hilfsfunktionen
+# =========================
+
 def backup_datei(pfad):
     if not pfad.exists():
         return
@@ -132,10 +135,113 @@ def set_cell_bold(cell):
             run.bold = True
 
 
-def clear_cell(cell):
+def set_cell_text(cell, text, bold=False, font_size=8, align="center"):
     cell.text = ""
+    p = cell.paragraphs[0]
+
+    if align == "center":
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    elif align == "left":
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    run = p.add_run(str(text))
+    run.bold = bold
+    run.font.size = Pt(8)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+
+def set_column_width(table, column_index, width_cm):
+    for row in table.rows:
+        cell = row.cells[column_index]
+        cell.width = Cm(width_cm)
+        tc = cell._tc
+        tc_pr = tc.get_or_add_tcPr()
+        tc_w = tc_pr.first_child_found_in("w:tcW")
+        if tc_w is None:
+            tc_w = OxmlElement("w:tcW")
+            tc_pr.append(tc_w)
+        tc_w.set(qn("w:w"), str(int(width_cm * 567)))
+        tc_w.set(qn("w:type"), "dxa")
+
+
+def clear_cell(cell):
+    set_cell_text(cell, "", font_size=8, align="left")
     set_cell_shading(cell, FARBE_WEISS)
 
+
+def add_text(cell, text):
+    if text in cell.text:
+        return
+
+    if cell.text.strip():
+        cell.text = cell.text.strip() + "\n" + text
+    else:
+        cell.text = text
+
+    for paragraph in cell.paragraphs:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        for run in paragraph.runs:
+            run.font.size = Pt(7)
+
+
+def erstelle_leeres_dokument(schuljahr, bundesland):
+    doc = Document()
+
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Cm(29.7)
+    section.page_height = Cm(21)
+    section.top_margin = Cm(1.2)
+    section.bottom_margin = Cm(1.2)
+    section.left_margin = Cm(1.2)
+    section.right_margin = Cm(1.2)
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title.add_run(f"Schuljahresplan {schuljahr}")
+    title_run.bold = True
+    title_run.font.size = Pt(16)
+
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_run = subtitle.add_run(f"Bundesland: {bundesland}")
+    subtitle_run.font.size = Pt(10)
+
+    doc.add_paragraph("")
+
+    # 1 Kopfzeile + 45 Wochenzeilen reichen für ein Schuljahr sicher aus.
+    table = doc.add_table(rows=46, cols=7)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+
+    headers = [
+    "KW",
+    "Zeitraum",
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag"
+   ]
+    header_cells = table.rows[0].cells
+
+    for index, header in enumerate(headers):
+        cell = header_cells[index]
+        set_cell_text(cell, header, bold=True, font_size=9, align="center")
+        set_cell_shading(cell, FARBE_HEADER)
+        set_cell_bold(cell)
+
+        widths = [1.2, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5]
+    for index, width in enumerate(widths):
+        set_column_width(table, index, width)
+
+    return doc, table
+
+
+# =========================
+# Datums-/API-Funktionen
+# =========================
 
 def parse_schuljahr(text):
     match = re.match(r"^(\d{4})/(\d{4})$", text.strip())
@@ -172,16 +278,6 @@ def extract_name(item):
         return names
 
     return "Ferien"
-
-
-def add_text(cell, text):
-    if text in cell.text:
-        return
-
-    if cell.text.strip():
-        cell.text = cell.text.strip() + "\n" + text
-    else:
-        cell.text = text
 
 
 def lade_schulferien(startjahr, endjahr, subdivision_code):
@@ -316,21 +412,9 @@ def eintraege_fuer_tag(eintraege, tag):
     return feiertage
 
 
-def entferne_unteren_text(doc):
-    loeschen = False
-
-    for p in doc.paragraphs:
-        text = p.text.strip()
-
-        if (
-            text.startswith("Klassenleiterunterricht")
-            or text.startswith("Diagnostikwochen")
-            or text.startswith("Noch zu planen")
-            or loeschen
-        ):
-            loeschen = True
-            p.text = ""
-
+# =========================
+# Hauptfunktionen
+# =========================
 
 def create_plan():
     global aktueller_plan
@@ -367,24 +451,23 @@ def create_plan():
             status_var.set("Fehler.")
             return
 
-        doc = Document(VORLAGE)
-        table = doc.tables[0]
+        doc, table = erstelle_leeres_dokument(schuljahr, bundesland)
 
         woche = start_montag
 
-        for row in table.rows:
+        for row in table.rows[1:]:
             montag = woche
             freitag = montag + timedelta(days=4)
 
-            row.cells[1].text = str(montag.isocalendar().week)
-            row.cells[3].text = f"{format_de(montag)} – {format_de(freitag)}"
+            set_cell_text(row.cells[0], str(montag.isocalendar().week), font_size=7, align="center")
+            set_cell_text(row.cells[1], f"{format_de(montag)} – {format_de(freitag)}", font_size=7, align="center")
 
-            for i in range(4, 9):
+            for i in range(2, 7):
                 clear_cell(row.cells[i])
 
             for offset in range(5):
                 tag = montag + timedelta(days=offset)
-                cell = row.cells[4 + offset]
+                cell = row.cells[2 + offset]
 
                 for e in eintraege_fuer_tag(eintraege, tag):
                     add_text(cell, e["name"])
@@ -397,8 +480,6 @@ def create_plan():
                         set_cell_bold(cell)
 
             woche += timedelta(days=7)
-
-        entferne_unteren_text(doc)
 
         safe_schuljahr = schuljahr.replace("/", "-")
         dateiname = f"Schuljahresplan {safe_schuljahr}.docx"
@@ -416,6 +497,9 @@ def create_plan():
         status_var.set(f"Plan erstellt: {dateiname}")
         messagebox.showinfo("OK", f"Plan erstellt:\n{ziel}")
 
+    except requests.RequestException as e:
+        status_var.set("Fehler beim Abrufen der Daten.")
+        messagebox.showerror("Fehler", f"Ferien oder Feiertage konnten nicht abgerufen werden:\n{e}")
     except Exception as e:
         status_var.set("Fehler beim Erstellen.")
         messagebox.showerror("Fehler", f"Plan konnte nicht erstellt werden:\n{e}")
@@ -425,7 +509,7 @@ def lade_plan():
     global aktueller_plan
 
     datei = filedialog.askopenfilename(
-        title="Vorhandenen Jahresarbeitsplan auswählen",
+        title="Vorhandenen Schuljahresplan auswählen",
         filetypes=[("Word-Dateien", "*.docx")]
     )
 
@@ -453,7 +537,15 @@ def parse_event_zeit(text):
 
     text = text.replace(".", ":")
     stunde, minute = text.split(":")
-    return f"{int(stunde):02d}:{int(minute):02d}"
+
+    stunde = int(stunde)
+    minute = int(minute)
+
+    if stunde > 23 or minute > 59:
+        messagebox.showerror("Fehler", "Bitte eine gültige Uhrzeit eingeben.")
+        return False
+
+    return f"{stunde:02d}:{minute:02d}"
 
 
 def sortiere_events_in_zelle(cell):
@@ -466,6 +558,11 @@ def sortiere_events_in_zelle(cell):
         return (1, 99, 99, zeile)
 
     cell.text = "\n".join(sorted(set(zeilen), key=sort_key))
+
+    for paragraph in cell.paragraphs:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        for run in paragraph.runs:
+            run.font.size = Pt(7)
 
 
 def event_hinzufuegen():
@@ -499,7 +596,7 @@ def event_hinzufuegen():
 
         ziel_spalte = SPALTEN[datum_event.weekday()]
 
-        for row in table.rows:
+        for row in table.rows[1:]:
             zeitraum = row.cells[3].text.strip()
 
             if "–" not in zeitraum:
@@ -567,7 +664,10 @@ def update_datum_label(event=None):
     auswahl_label.config(text=f"{tage[d.weekday()]} {d.strftime('%d.%m.%Y')}")
 
 
-# Einstellungen vor Aufbau der GUI laden
+# =========================
+# GUI
+# =========================
+
 settings = load_settings()
 
 saved_bundesland = settings.get("bundesland", "Sachsen")
@@ -584,17 +684,17 @@ saved_plan = settings.get("letzter_plan", "")
 if saved_plan and Path(saved_plan).exists():
     aktueller_plan = Path(saved_plan)
 
-
 root = tk.Tk()
 root.title(f"{APP_NAME} {APP_VERSION}")
-root.geometry("1000x850")
 root.minsize(900, 800)
 
-# Fenster zentrieren
-root.update_idletasks()
-x = (root.winfo_screenwidth() // 2) - (1000 // 2)
-y = (root.winfo_screenheight() // 2) - (850 // 2)
-root.geometry(f"1000x850+{x}+{y}")
+# Linux-kompatible Maximierung. Falls das System es nicht unterstützt, wird eine große Fenstergröße verwendet.
+try:
+    root.attributes("-zoomed", True)
+except tk.TclError:
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    root.geometry(f"{screen_width}x{screen_height}+0+0")
 
 style = ttk.Style()
 style.theme_use("clam")
@@ -616,7 +716,11 @@ main = ttk.Frame(root, padding=18)
 main.pack(fill="both", expand=True)
 
 ttk.Label(main, text=APP_NAME, style="Title.TLabel").pack(anchor="center", pady=(0, 4))
-ttk.Label(main, text=f"Version {APP_VERSION} · © 2026 Max K.", style="TLabel").pack(anchor="center", pady=(0, 14))
+ttk.Label(
+    main,
+    text=f"Version {APP_VERSION} · erstellt Schuljahrespläne ohne externe Word-Vorlage · © 2026 Max K.",
+    style="TLabel"
+).pack(anchor="center", pady=(0, 14))
 
 card_create = ttk.Frame(main, style="Card.TFrame", padding=18)
 card_create.pack(fill="x", pady=10)
@@ -640,14 +744,14 @@ frei_input.insert(0, saved_frei_tage)
 
 ttk.Label(card_create, text="Mehrere Daten mit Komma trennen, z.B. 24.05.2027", style="Hint.TLabel").grid(row=4, column=1, sticky="w", pady=(0, 10))
 
-ttk.Button(card_create, text="Plan erstellen", command=create_plan, style="Primary.TButton").grid(row=5, column=1, sticky="e", pady=(8, 0))
+ttk.Button(card_create, text="Neuen Schuljahresplan erstellen", command=create_plan, style="Primary.TButton").grid(row=5, column=1, sticky="e", pady=(8, 0))
 
 card_create.columnconfigure(1, weight=1)
 
 card_edit = ttk.Frame(main, style="Card.TFrame", padding=18)
 card_edit.pack(fill="x", pady=10)
 
-ttk.Label(card_edit, text="Vorhandenen Plan bearbeiten", style="SubTitle.TLabel").pack(anchor="w", pady=(0, 10))
+ttk.Label(card_edit, text="Aktueller Schuljahresplan", style="SubTitle.TLabel").pack(anchor="w", pady=(0, 10))
 
 plan_label = ttk.Label(card_edit, text=f"Aktueller Plan:\n{aktueller_plan}", style="CardText.TLabel", wraplength=720)
 plan_label.pack(anchor="w", pady=(0, 12))
@@ -655,13 +759,13 @@ plan_label.pack(anchor="w", pady=(0, 12))
 button_row = ttk.Frame(card_edit, style="Card.TFrame")
 button_row.pack(fill="x")
 
-ttk.Button(button_row, text="Plan laden", command=lade_plan).pack(side="left", padx=(0, 10))
-ttk.Button(button_row, text="Plan öffnen", command=plan_oeffnen).pack(side="left")
+ttk.Button(button_row, text="Vorhandenen Plan laden", command=lade_plan).pack(side="left", padx=(0, 10))
+ttk.Button(button_row, text="Aktuellen Plan öffnen", command=plan_oeffnen).pack(side="left")
 
 card_event = ttk.Frame(main, style="Card.TFrame", padding=18)
 card_event.pack(fill="x", pady=10)
 
-ttk.Label(card_event, text="Ereignis hinzufügen", style="SubTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+ttk.Label(card_event, text="Ereignis in Plan eintragen", style="SubTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
 ttk.Label(card_event, text="Datum", style="CardText.TLabel").grid(row=1, column=0, sticky="w", pady=5)
 event_datum = DateEntry(card_event, date_pattern="dd.mm.yyyy", width=16)
@@ -683,7 +787,7 @@ ttk.Button(card_event, text="Ereignis hinzufügen", command=event_hinzufuegen, s
 
 card_event.columnconfigure(1, weight=1)
 
-status_var = tk.StringVar(value="Bereit.")
+status_var = tk.StringVar(value="Bereit · Einstellungen werden automatisch gespeichert")
 status = ttk.Label(main, textvariable=status_var, style="Status.TLabel", padding=8)
 status.pack(fill="x", pady=(12, 0))
 
