@@ -1,6 +1,6 @@
 ## Vorschau
 
-![Screenshot](docs/screenshots/Screenshot.png)
+![Schuljahresplan Agent UI](docs/screenshots/screenshot-ui.png)
 
 # Schuljahresplan Agent
 
