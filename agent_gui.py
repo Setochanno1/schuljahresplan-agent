@@ -570,7 +570,7 @@ def event_hinzufuegen():
         messagebox.showerror("Fehler", "Bitte zuerst einen Plan erstellen oder laden.")
         return
 
-    datum_event = event_datum.get_date()
+    datum_event = parse_date(event_datum.get())
     ereignis = event_text.get().strip()
     zeit = event_zeit.get().strip()
 
@@ -597,7 +597,7 @@ def event_hinzufuegen():
         ziel_spalte = SPALTEN[datum_event.weekday()]
 
         for row in table.rows[1:]:
-            zeitraum = row.cells[3].text.strip()
+            zeitraum = row.cells[1].text.strip()
 
             if "–" not in zeitraum:
                 continue
@@ -637,6 +637,119 @@ def event_hinzufuegen():
         status_var.set("Fehler beim Hinzufügen.")
         messagebox.showerror("Fehler", f"Ereignis konnte nicht hinzugefügt werden:\n{e}")
 
+def events_fuer_datum_anzeigen():
+    if not aktueller_plan.exists():
+        messagebox.showerror("Fehler", "Bitte zuerst einen Plan erstellen oder laden.")
+        return
+
+    datum_event = parse_date(event_datum.get())
+
+    if datum_event.weekday() > 4:
+        messagebox.showerror("Fehler", "Das Datum liegt am Wochenende.")
+        return
+
+    try:
+        doc = Document(aktueller_plan)
+        table = doc.tables[0]
+
+        ziel_spalte = SPALTEN[datum_event.weekday()]
+
+        for row_index, row in enumerate(table.rows[1:], start=1):
+            zeitraum = row.cells[1].text.strip()
+
+            if "–" not in zeitraum:
+                continue
+
+            start_text, ende_text = [x.strip() for x in zeitraum.split("–")]
+
+            try:
+                start = parse_date(start_text)
+                ende = parse_date(ende_text)
+            except ValueError:
+                continue
+
+            if start <= datum_event <= ende:
+                zelle = row.cells[ziel_spalte]
+                eintraege = [z.strip() for z in zelle.text.split("\n") if z.strip()]
+
+                if not eintraege:
+                    messagebox.showinfo("Keine Ereignisse", "Für dieses Datum sind keine Ereignisse eingetragen.")
+                    return
+
+                event_loeschen_popup(doc, table, row_index, ziel_spalte, eintraege)
+                return
+
+        messagebox.showerror("Fehler", "Passende Woche nicht gefunden.")
+
+    except Exception as e:
+        messagebox.showerror("Fehler", f"Ereignisse konnten nicht geladen werden:\n{e}")
+
+
+def event_loeschen_popup(doc, table, row_index, ziel_spalte, eintraege):
+    popup = tk.Toplevel(root)
+    popup.title("Ereignisse anzeigen / löschen")
+    popup.geometry("520x360")
+    popup.transient(root)
+    popup.grab_set()
+
+    ttk.Label(
+        popup,
+        text="Ereignisse für das ausgewählte Datum",
+        font=("Arial", 12, "bold")
+    ).pack(anchor="w", padx=16, pady=(16, 8))
+
+    listbox = tk.Listbox(popup, height=10)
+    listbox.pack(fill="both", expand=True, padx=16, pady=8)
+
+    for eintrag in eintraege:
+        listbox.insert(tk.END, eintrag)
+
+    def loeschen():
+        auswahl = listbox.curselection()
+
+        if not auswahl:
+            messagebox.showwarning("Hinweis", "Bitte zuerst ein Ereignis auswählen.")
+            return
+
+        index = auswahl[0]
+        eintrag = listbox.get(index)
+
+        bestaetigt = messagebox.askyesno(
+            "Ereignis löschen",
+            f"Dieses Ereignis wirklich löschen?\n\n{eintrag}"
+        )
+
+        if not bestaetigt:
+            return
+
+        try:
+            backup_datei(aktueller_plan)
+
+            zelle = table.rows[row_index].cells[ziel_spalte]
+            neue_eintraege = [e for e in eintraege if e != eintrag]
+            zelle.text = "\n".join(neue_eintraege)
+
+            sortiere_events_in_zelle(zelle)
+
+            doc.save(aktueller_plan)
+
+            listbox.delete(index)
+            eintraege.remove(eintrag)
+
+            status_var.set("Ereignis gelöscht. Backup erstellt.")
+
+            if not eintraege:
+                popup.destroy()
+                messagebox.showinfo("OK", "Ereignis gelöscht. Für dieses Datum sind keine weiteren Ereignisse vorhanden.")
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Ereignis konnte nicht gelöscht werden:\n{e}")
+
+    button_frame = ttk.Frame(popup, padding=12)
+    button_frame.pack(fill="x")
+
+    ttk.Button(button_frame, text="Ausgewähltes Ereignis löschen", command=loeschen).pack(side="left")
+    ttk.Button(button_frame, text="Schließen", command=popup.destroy).pack(side="right")
 
 def plan_oeffnen():
     if not aktueller_plan.exists():
@@ -659,10 +772,12 @@ def plan_oeffnen():
 
 
 def update_datum_label(event=None):
-    d = event_datum.get_date()
-    tage = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
-    auswahl_label.config(text=f"{tage[d.weekday()]} {d.strftime('%d.%m.%Y')}")
-
+    try:
+        d = parse_date(event_datum.get())
+        tage = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        auswahl_label.config(text=f"{tage[d.weekday()]} {d.strftime('%d.%m.%Y')}")
+    except ValueError:
+        auswahl_label.config(text="Ungültiges Datum")
 
 # =========================
 # GUI
@@ -768,12 +883,12 @@ card_event.pack(fill="x", pady=10)
 ttk.Label(card_event, text="Ereignis in Plan eintragen", style="SubTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
 ttk.Label(card_event, text="Datum", style="CardText.TLabel").grid(row=1, column=0, sticky="w", pady=5)
-event_datum = DateEntry(card_event, date_pattern="dd.mm.yyyy", width=16)
+event_datum = ttk.Entry(card_event, width=18)
 event_datum.grid(row=1, column=1, sticky="w", pady=5)
+event_datum.insert(0, datetime.now().strftime("%d.%m.%Y"))
 
 auswahl_label = ttk.Label(card_event, text="", style="CardText.TLabel")
 auswahl_label.grid(row=2, column=1, sticky="w", pady=(0, 8))
-event_datum.bind("<<DateEntrySelected>>", update_datum_label)
 
 ttk.Label(card_event, text="Uhrzeit optional", style="CardText.TLabel").grid(row=3, column=0, sticky="w", pady=5)
 event_zeit = ttk.Entry(card_event, width=18)
@@ -784,6 +899,11 @@ event_text = ttk.Entry(card_event, width=55)
 event_text.grid(row=4, column=1, sticky="ew", pady=5)
 
 ttk.Button(card_event, text="Ereignis hinzufügen", command=event_hinzufuegen, style="Primary.TButton").grid(row=5, column=1, sticky="e", pady=(12, 0))
+ttk.Button(
+    card_event,
+    text="Ereignisse anzeigen / löschen",
+    command=events_fuer_datum_anzeigen
+).grid(row=6, column=1, sticky="e", pady=(8, 0))
 
 card_event.columnconfigure(1, weight=1)
 
