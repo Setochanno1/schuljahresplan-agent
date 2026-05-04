@@ -1,35 +1,42 @@
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
+
+import requests
+import tkinter as tk
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from tkcalendar import DateEntry
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+
+
+APP_NAME = "Schuljahresplan Agent"
+APP_VERSION = "1.1"
+SETTINGS_FILE = "settings.json"
+
 
 def resource_path(relative_path):
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / relative_path
     return Path(__file__).parent / relative_path
 
-VORLAGE = resource_path("Jahresarbeitsplan 25-26.docx")
-from pathlib import Path
-from datetime import datetime, timedelta
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-import tkinter as tk
-from tkinter import messagebox, filedialog
-from tkinter import ttk
-from tkcalendar import DateEntry
-import requests
-import re
-import subprocess
-import platform
-import shutil
-
-import os
 
 BASE_PATH = Path(os.getcwd())
+SETTINGS_PATH = BASE_PATH / SETTINGS_FILE
 
 AUSGABE_ORDNER = BASE_PATH / "ausgabe"
 BACKUP_ORDNER = AUSGABE_ORDNER / "backups"
-
 STANDARD_AUSGABE = AUSGABE_ORDNER / "Jahresarbeitsplan_neu.docx"
+
+VORLAGE = resource_path("Jahresarbeitsplan 25-26.docx")
 aktueller_plan = STANDARD_AUSGABE
 
 BUNDESLAENDER = {
@@ -67,6 +74,34 @@ FARBE_FERIEN = "BFBFBF"
 FARBE_FREI = "FFF2CC"
 FARBE_WEISS = "FFFFFF"
 
+
+def load_settings():
+    if not SETTINGS_PATH.exists():
+        return {}
+
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        messagebox.showwarning("Hinweis", f"Einstellungen konnten nicht gespeichert werden:\n{e}")
+
+
+def save_current_settings():
+    data = {
+        "bundesland": bundesland_var.get(),
+        "schuljahr": schuljahr_var.get(),
+        "frei_bewegliche_ferientage": frei_input.get().strip(),
+        "letzter_plan": str(aktueller_plan) if aktueller_plan else "",
+    }
+    save_settings(data)
 
 
 def backup_datei(pfad):
@@ -370,13 +405,13 @@ def create_plan():
         ziel = AUSGABE_ORDNER / dateiname
 
         ziel.parent.mkdir(exist_ok=True)
-
         backup_datei(ziel)
-
         doc.save(ziel)
 
         aktueller_plan = ziel
         plan_label.config(text=f"Aktueller Plan:\n{aktueller_plan}")
+
+        save_current_settings()
 
         status_var.set(f"Plan erstellt: {dateiname}")
         messagebox.showinfo("OK", f"Plan erstellt:\n{ziel}")
@@ -400,6 +435,9 @@ def lade_plan():
     aktueller_plan = Path(datei)
     plan_label.config(text=f"Aktueller Plan:\n{aktueller_plan}")
     status_var.set("Plan geladen.")
+
+    save_current_settings()
+
     messagebox.showinfo("OK", "Plan geladen.")
 
 
@@ -486,6 +524,12 @@ def event_hinzufuegen():
                 sortiere_events_in_zelle(zelle)
 
                 doc.save(aktueller_plan)
+
+                event_text.delete(0, tk.END)
+                event_zeit.delete(0, tk.END)
+
+                save_current_settings()
+
                 status_var.set("Ereignis hinzugefügt. Backup erstellt.")
                 messagebox.showinfo("OK", "Ereignis hinzugefügt.\nBackup wurde erstellt.")
                 return
@@ -511,8 +555,11 @@ def plan_oeffnen():
             subprocess.Popen(["xdg-open", str(aktueller_plan)])
         elif system == "Darwin":
             subprocess.Popen(["open", str(aktueller_plan)])
+        else:
+            messagebox.showerror("Fehler", f"Nicht unterstütztes System: {system}")
     except Exception as e:
         messagebox.showerror("Fehler", f"Plan konnte nicht geöffnet werden:\n{e}")
+
 
 def update_datum_label(event=None):
     d = event_datum.get_date()
@@ -520,10 +567,26 @@ def update_datum_label(event=None):
     auswahl_label.config(text=f"{tage[d.weekday()]} {d.strftime('%d.%m.%Y')}")
 
 
-root = tk.Tk()
-root.title("Schuljahresplan Agent")
-# Dynamische Fenstergröße basierend auf Bildschirm
+# Einstellungen vor Aufbau der GUI laden
+settings = load_settings()
 
+saved_bundesland = settings.get("bundesland", "Sachsen")
+if saved_bundesland not in BUNDESLAENDER:
+    saved_bundesland = "Sachsen"
+
+saved_schuljahr = settings.get("schuljahr", "2026/2027")
+if saved_schuljahr not in SCHULJAHRE:
+    saved_schuljahr = "2026/2027"
+
+saved_frei_tage = settings.get("frei_bewegliche_ferientage", "")
+
+saved_plan = settings.get("letzter_plan", "")
+if saved_plan and Path(saved_plan).exists():
+    aktueller_plan = Path(saved_plan)
+
+
+root = tk.Tk()
+root.title(f"{APP_NAME} {APP_VERSION}")
 root.geometry("1000x850")
 root.minsize(900, 800)
 
@@ -552,7 +615,8 @@ style.configure("TCombobox", padding=5)
 main = ttk.Frame(root, padding=18)
 main.pack(fill="both", expand=True)
 
-ttk.Label(main, text="Schuljahresplan Agent", style="Title.TLabel").pack(anchor="center", pady=(0, 14))
+ttk.Label(main, text=APP_NAME, style="Title.TLabel").pack(anchor="center", pady=(0, 4))
+ttk.Label(main, text=f"Version {APP_VERSION} · © 2026 Max K.", style="TLabel").pack(anchor="center", pady=(0, 14))
 
 card_create = ttk.Frame(main, style="Card.TFrame", padding=18)
 card_create.pack(fill="x", pady=10)
@@ -560,18 +624,19 @@ card_create.pack(fill="x", pady=10)
 ttk.Label(card_create, text="Neuen Plan erstellen", style="SubTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
 ttk.Label(card_create, text="Bundesland", style="CardText.TLabel").grid(row=1, column=0, sticky="w", pady=5)
-bundesland_var = tk.StringVar(value="Sachsen")
+bundesland_var = tk.StringVar(value=saved_bundesland)
 bundesland_box = ttk.Combobox(card_create, textvariable=bundesland_var, values=list(BUNDESLAENDER.keys()), state="readonly", width=28)
 bundesland_box.grid(row=1, column=1, sticky="ew", pady=5)
 
 ttk.Label(card_create, text="Schuljahr", style="CardText.TLabel").grid(row=2, column=0, sticky="w", pady=5)
-schuljahr_var = tk.StringVar(value="2026/2027")
+schuljahr_var = tk.StringVar(value=saved_schuljahr)
 schuljahr_box = ttk.Combobox(card_create, textvariable=schuljahr_var, values=SCHULJAHRE, state="readonly", width=28)
 schuljahr_box.grid(row=2, column=1, sticky="ew", pady=5)
 
 ttk.Label(card_create, text="Frei bewegliche Ferientage", style="CardText.TLabel").grid(row=3, column=0, sticky="w", pady=5)
 frei_input = ttk.Entry(card_create, width=45)
 frei_input.grid(row=3, column=1, sticky="ew", pady=5)
+frei_input.insert(0, saved_frei_tage)
 
 ttk.Label(card_create, text="Mehrere Daten mit Komma trennen, z.B. 24.05.2027", style="Hint.TLabel").grid(row=4, column=1, sticky="w", pady=(0, 10))
 
